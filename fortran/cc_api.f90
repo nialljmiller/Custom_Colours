@@ -7,7 +7,7 @@
 !   - No derived types in any public interface
 !   - All array dimensions passed explicitly as integers
 !   - Intent annotations on every dummy argument
-!   - No allocatable intent(out) — caller allocates, Fortran fills
+!   - No allocatable intent(out) ? caller allocates, Fortran fills
 !   - Module-level USE of cc_kernels; no re-export of internals
 !
 ! Python import after building:
@@ -56,13 +56,13 @@ contains
    !
    ! Parameters (Python-visible names after f2py binding)
    ! -------------------------------------------------------
-   ! teff, logg, meta : scalar float64 — query point
-   ! teff_grid(nt)    : float64 array — Teff axis
-   ! logg_grid(nl)    : float64 array — logg axis
-   ! meta_grid(nm)    : float64 array — [M/H] axis
-   ! flux_cube(nt,nl,nm,nw) : float64 — the full atmosphere flux cube
-   ! result_flux(nw)  : float64, intent(out) — interpolated surface flux
-   ! ierr             : int, intent(out) — 0=ok, 1=clamped to boundary
+   ! teff, logg, meta : scalar float64 ? query point
+   ! teff_grid(nt)    : float64 array ? Teff axis
+   ! logg_grid(nl)    : float64 array ? logg axis
+   ! meta_grid(nm)    : float64 array ? [M/H] axis
+   ! flux_cube(nt,nl,nm,nw) : float64 ? the full atmosphere flux cube
+   ! result_flux(nw)  : float64, intent(out) ? interpolated surface flux
+   ! ierr             : int, intent(out) ? 0=ok, 1=clamped to boundary
    ! -------------------------------------------------------------------------
    subroutine interp_sed_hermite(teff, logg, meta, &
                                   teff_grid, nt, &
@@ -146,10 +146,10 @@ contains
    !
    ! Parameters
    ! ----------
-   ! sed_wave(nw)        : SED wavelength grid (Å)
-   ! obs_flux(nw)        : diluted (observer-frame) SED flux (erg/s/cm^2/Å)
-   ! filt_wave(nf)       : filter wavelength grid (Å)
-   ! filt_trans(nf)      : filter transmission [0–1]
+   ! sed_wave(nw)        : SED wavelength grid (?)
+   ! obs_flux(nw)        : diluted (observer-frame) SED flux (erg/s/cm^2/?)
+   ! filt_wave(nf)       : filter wavelength grid (?)
+   ! filt_trans(nf)      : filter transmission [0?1]
    ! zero_point          : precomputed photometric zero-point
    ! mag                 : output magnitude
    ! band_flux           : output in-band flux (before zero-point)

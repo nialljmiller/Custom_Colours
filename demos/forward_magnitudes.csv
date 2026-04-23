@@ -1,0 +1,10 @@
+# Custom_Colours synthetic photometry
+# Teff=5778.0 K  logg=4.440  [M/H]=0.000  system=AB
+# filter_name, magnitude, band_flux_erg_s_cm2_AA
+B,5.301923,4.225091e-11
+I,4.523676,2.210313e-11
+J,4.559418,1.057052e-11
+M,6.775378,8.445864e-14
+R,4.587473,3.344131e-11
+U,6.412689,2.385272e-11
+V,4.790222,4.325976e-11

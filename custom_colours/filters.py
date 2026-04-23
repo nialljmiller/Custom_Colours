@@ -193,13 +193,41 @@ def load_filters_from_instrument_dir(
 # Internal I/O helpers
 # ---------------------------------------------------------------------------
 
+
+def _sniff_delimiter(path: Path) -> str:
+    """Return ',' if the file looks like CSV, else None (whitespace)."""
+    with open(path, encoding="utf-8", errors="ignore") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            return "," if "," in line else None
+    return None
+
+
 def _load_filter_dat(path: Path) -> tuple[np.ndarray, np.ndarray]:
-    """Read a two-column filter .dat file (wavelength Å, transmission)."""
+    """Read a two-column filter .dat file (wavelength Å, transmission).
+
+    Handles both plain whitespace-separated files and CSV files with an
+    optional header row (e.g. 'Wavelength,Transmission').
+    """
     if not path.exists():
         raise FileNotFoundError(f"Filter file not found: {path}")
 
-    data = np.loadtxt(path, comments="#")
-    if data.ndim != 2 or data.shape[1] < 2:
+    # Sniff the delimiter from the first non-comment line, then load.
+    # genfromtxt with invalid_raise=False produces NaN for non-numeric
+    # rows (e.g. a 'Wavelength,Transmission' CSV header) rather than
+    # raising, so we can simply drop those rows afterwards.
+    delimiter = _sniff_delimiter(path)
+    data = np.genfromtxt(path, comments="#", delimiter=delimiter,
+                         invalid_raise=False)
+
+    # Drop rows where either column is NaN (header or malformed lines).
+    if data.ndim == 2:
+        mask = np.isfinite(data[:, 0]) & np.isfinite(data[:, 1])
+        data = data[mask]
+
+    if data.ndim != 2 or data.shape[1] < 2 or len(data) == 0:
         raise ValueError(
             f"{path}: expected two-column file (wavelength, transmission)"
         )
@@ -237,7 +265,7 @@ def _load_vega_sed(path: Path) -> tuple[np.ndarray, np.ndarray]:
 
 def _trapz(x: np.ndarray, y: np.ndarray) -> float:
     """Trapezoidal integration (scalar result)."""
-    return float(np.trapz(y, x))
+    return float(np.trapezoid(y, x))
 
 
 def _compute_vega_zero_point(

@@ -7,7 +7,7 @@
 ! types, handle infrastructure, and I/O removed.
 !
 ! All subroutines operate purely on arrays passed by the caller.
-! No global state.  No disk I/O.  No STOP on error — ierr flags used.
+! No global state.  No disk I/O.  No STOP on error -- ierr flags used.
 !
 ! Copyright (C) 2025 Niall Miller
 ! LGPL-3.0-or-later
@@ -360,7 +360,7 @@ contains
    ! =========================================================================
 
    subroutine cc_dilute_flux(surface_flux, nw, R, d, observed_flux)
-      ! F_obs(λ) = F_surf(λ) × (R / d)²
+      ! F_obs(lambda) = F_surf(lambda) * (R / d)2
       integer,  intent(in)  :: nw
       real(dp), intent(in)  :: surface_flux(nw), R, d
       real(dp), intent(out) :: observed_flux(nw)
@@ -467,7 +467,7 @@ contains
    subroutine cc_synthetic_flux(sed_wave, obs_flux, filt_on_sed_grid, nw, &
                                  synthetic_flux, ierr)
       ! Photon-counting in-band flux:
-      !   F_band = ∫ F(λ) T(λ) λ dλ / ∫ T(λ) λ dλ
+      !   F_band = integral F(lambda) T(lambda) lambda dlambda / integral T(lambda) lambda dlambda
       integer,  intent(in)  :: nw
       real(dp), intent(in)  :: sed_wave(nw), obs_flux(nw), filt_on_sed_grid(nw)
       real(dp), intent(out) :: synthetic_flux
@@ -525,19 +525,15 @@ contains
 
 
    subroutine cc_bolometric_magnitude(bol_flux, bol_mag, ierr)
-      ! M_bol = M_bol_sun - 2.5 log10(F_bol / F_bol_sun_at_10pc)
-      ! where F_bol_sun_at_10pc = L_sun / (4 pi (10 pc)^2)
-      ! We use the IAU 2015 relation: M_bol = -2.5 log10(F_bol) - 18.997350
-      ! (calibrated so the Sun has M_bol = 4.74 at 10 pc)
+      ! Mag_bol = -2.5 * log10(F_bol)  [F_bol in erg/s/cm^2]
+      ! Matches the MESA colors convention: no additional zero-point.
       real(dp), intent(in)  :: bol_flux
       real(dp), intent(out) :: bol_mag
       integer,  intent(out) :: ierr
 
-      real(dp), parameter :: ZP = 18.997350d0  ! IAU 2015 bolometric flux zero-point
-
       ierr = 0
       if (bol_flux > 0.0_dp) then
-         bol_mag = -2.5_dp * log10(bol_flux) - ZP
+         bol_mag = -2.5_dp * log10(bol_flux)
       else
          bol_mag = -99.9_dp
          ierr = 1

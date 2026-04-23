@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools", "numpy", "meson", "ninja"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "custom_colours"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "pandas",
+    "emcee",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["custom_colours*"]
