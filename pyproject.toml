@@ -18,3 +18,7 @@ dev = ["pytest"]
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["custom_colours*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v"

@@ -13,3 +13,4 @@ custom_colours.egg-info/dependency_links.txt
 custom_colours.egg-info/requires.txt
 custom_colours.egg-info/top_level.txt
 tests/test_forward.py
+tests/test_inverse.py
