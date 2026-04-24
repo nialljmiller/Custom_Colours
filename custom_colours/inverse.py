@@ -3,25 +3,44 @@ custom_colours.inverse
 ======================
 Inverse model: observed magnitudes → posterior on (Teff, logg, [M/H]).
 
-Uses emcee (MCMC) with a Gaussian likelihood on the residuals between
+Uses emcee (MCMC) with a Gaussian likelihood on residuals between
 observed and model magnitudes.  The forward model is called at every
 walker step, so the Fortran kernels must be built.
+
+Extinction
+----------
+Pass an ``ExtinctionModel`` from ``sed_extinction`` to the ``extinction``
+keyword.  It is a **fixed parameter** — not sampled by the MCMC.  The
+same model instance is forwarded to every ``run_forward`` call inside
+the likelihood, so the reddening curve and Av are held constant while
+Teff, logg, and [M/H] are inferred.
+
+Extinction is disabled by default.  Enable it like this:
+
+    from sed_extinction import ExtinctionModel
+    ext = ExtinctionModel(enabled=True, law='fitzpatrick99',
+                          a_v=0.3, r_v=3.1)
+    posterior = run_inverse(..., extinction=ext)
+
+Distance
+--------
+Distance is also a fixed parameter passed as ``d`` in cm — not sampled.
+Set it to the known or estimated distance before calling run_inverse.
+Default (if you omit it) remains 10 pc = 3.086e19 cm as before.
 
 Public API
 ----------
 run_inverse(obs_magnitudes, obs_uncertainties, filter_names,
-            R, d, grid, filters, ...)
+            R, d, grid, filters,
+            extinction=None,           # fixed, not fitted
+            ...)
     → InverseResult
-
-The filter ordering in obs_magnitudes / obs_uncertainties must match
-the order of filter_names, which in turn must match names in the
-`filters` list passed in.
 """
 
 from __future__ import annotations
 
 import warnings
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 import numpy as np
 
@@ -30,9 +49,12 @@ from .filters import Filter
 from .forward import run_forward
 from .io import InverseResult
 
+if TYPE_CHECKING:
+    from sed_extinction import ExtinctionModel
+
 
 # ---------------------------------------------------------------------------
-# Likelihood and prior
+# Prior
 # ---------------------------------------------------------------------------
 
 def _log_prior(theta: np.ndarray, grid: AtmosphereGrid) -> float:
@@ -45,21 +67,29 @@ def _log_prior(theta: np.ndarray, grid: AtmosphereGrid) -> float:
     return -np.inf
 
 
+# ---------------------------------------------------------------------------
+# Likelihood
+# ---------------------------------------------------------------------------
+
 def _log_likelihood(
     theta: np.ndarray,
     obs_mag: np.ndarray,
     obs_err: np.ndarray,
-    filter_order: list[str],
+    filter_order: list,
     R: float,
     d: float,
     grid: AtmosphereGrid,
-    filters: list[Filter],
+    filters: list,
     mag_system: str,
     interp_method: str,
+    extinction: Optional["ExtinctionModel"],
 ) -> float:
     """Gaussian log-likelihood summed over all filters.
 
     L = -0.5 × Σ [ (m_obs - m_model)² / σ² + ln(2π σ²) ]
+
+    Extinction is forwarded to the forward model unchanged — it is
+    applied inside run_forward after dilution and before convolution.
     """
     teff, logg, meta = theta
     try:
@@ -70,6 +100,7 @@ def _log_likelihood(
             filters=filters,
             mag_system=mag_system,
             interp_method=interp_method,
+            extinction=extinction,          # <-- passed straight through
         )
     except Exception:
         return -np.inf
@@ -80,34 +111,39 @@ def _log_likelihood(
         if m_model is None or not np.isfinite(m_model):
             return -np.inf
         sigma2 = obs_err[i] ** 2
-        ll += -0.5 * ((obs_mag[i] - m_model) ** 2 / sigma2 + np.log(2.0 * np.pi * sigma2))
-
+        ll += -0.5 * ((obs_mag[i] - m_model) ** 2 / sigma2
+                      + np.log(2.0 * np.pi * sigma2))
     return ll
 
+
+# ---------------------------------------------------------------------------
+# Posterior
+# ---------------------------------------------------------------------------
 
 def _log_posterior(
     theta: np.ndarray,
     obs_mag: np.ndarray,
     obs_err: np.ndarray,
-    filter_order: list[str],
+    filter_order: list,
     R: float,
     d: float,
     grid: AtmosphereGrid,
-    filters: list[Filter],
+    filters: list,
     mag_system: str,
     interp_method: str,
+    extinction: Optional["ExtinctionModel"],
 ) -> float:
     lp = _log_prior(theta, grid)
     if not np.isfinite(lp):
         return -np.inf
     return lp + _log_likelihood(
         theta, obs_mag, obs_err, filter_order,
-        R, d, grid, filters, mag_system, interp_method,
+        R, d, grid, filters, mag_system, interp_method, extinction,
     )
 
 
 # ---------------------------------------------------------------------------
-# Initial position sampler
+# Initial positions
 # ---------------------------------------------------------------------------
 
 def _initial_positions(
@@ -125,42 +161,43 @@ def _initial_positions(
     The ball is clamped to remain within grid bounds.
     """
     centre = np.array([
-        p0_teff if p0_teff is not None else np.mean(grid.teff_grid),
-        p0_logg if p0_logg is not None else np.mean(grid.logg_grid),
-        p0_meta if p0_meta is not None else np.mean(grid.meta_grid),
+        p0_teff if p0_teff is not None else 0.5 * (grid.teff_bounds[0] + grid.teff_bounds[1]),
+        p0_logg if p0_logg is not None else 0.5 * (grid.logg_bounds[0] + grid.logg_bounds[1]),
+        p0_meta if p0_meta is not None else 0.5 * (grid.meta_bounds[0] + grid.meta_bounds[1]),
     ])
 
-    # Scatter relative to grid range
-    scales = np.array([
+    # Characteristic scale for the scatter ball
+    scale = np.array([
         scatter * (grid.teff_bounds[1] - grid.teff_bounds[0]),
         scatter * (grid.logg_bounds[1] - grid.logg_bounds[0]),
         scatter * (grid.meta_bounds[1] - grid.meta_bounds[0]),
     ])
 
-    pos = centre + scales * rng.standard_normal((n_walkers, 3))
+    pos = centre + scale * rng.standard_normal((n_walkers, 3))
 
-    # Clamp each walker to bounds
-    pos[:, 0] = np.clip(pos[:, 0], *grid.teff_bounds)
-    pos[:, 1] = np.clip(pos[:, 1], *grid.logg_bounds)
-    pos[:, 2] = np.clip(pos[:, 2], *grid.meta_bounds)
+    # Clamp to grid bounds
+    lo = np.array([grid.teff_bounds[0], grid.logg_bounds[0], grid.meta_bounds[0]])
+    hi = np.array([grid.teff_bounds[1], grid.logg_bounds[1], grid.meta_bounds[1]])
+    pos = np.clip(pos, lo, hi)
 
     return pos
 
 
 # ---------------------------------------------------------------------------
-# Main entry point
+# Public API
 # ---------------------------------------------------------------------------
 
 def run_inverse(
-    obs_magnitudes: np.ndarray | list[float],
-    obs_uncertainties: np.ndarray | list[float],
-    filter_names: list[str],
+    obs_magnitudes: list,
+    obs_uncertainties: list,
+    filter_names: list,
     R: float,
     d: float,
     grid: AtmosphereGrid,
-    filters: list[Filter],
+    filters: list,
     mag_system: str = "AB",
     interp_method: str = "hermite",
+    extinction: Optional["ExtinctionModel"] = None,
     n_walkers: int = 32,
     n_steps: int = 2000,
     n_burn: int = 500,
@@ -168,52 +205,53 @@ def run_inverse(
     p0_teff: Optional[float] = None,
     p0_logg: Optional[float] = None,
     p0_meta: Optional[float] = None,
-    p0_scatter: float = 0.05,
-    progress: bool = True,
+    p0_scatter: float = 0.02,
     seed: Optional[int] = None,
+    progress: bool = True,
 ) -> InverseResult:
-    """Run MCMC inference: observed magnitudes → posterior on stellar parameters.
+    """Infer (Teff, logg, [M/H]) from observed broadband photometry.
 
     Parameters
     ----------
     obs_magnitudes : array-like, shape (n_filters,)
-        Observed magnitudes, one per filter.
+        Observed magnitudes, one per filter, in the same order as
+        ``filter_names``.
     obs_uncertainties : array-like, shape (n_filters,)
-        1-sigma magnitude uncertainties.  Filters with no measured
-        uncertainty should be given a generous value (e.g. 0.1 mag)
-        rather than zero.
+        1-sigma magnitude uncertainties.
     filter_names : list of str
-        Names identifying which filter each magnitude belongs to.
-        Must match the ``Filter.name`` attribute of filters in *filters*.
+        Filter names in the same order as ``obs_magnitudes``.  Each
+        name must match ``filt.name`` for some element of ``filters``.
     R : float
-        Stellar radius in cm.
+        Stellar radius in cm (fixed — not sampled).
     d : float
-        Distance in cm.
+        Distance in cm (fixed — not sampled).
     grid : AtmosphereGrid
         Loaded atmosphere grid.
     filters : list of Filter
-        Loaded filters — must include all names in *filter_names*.
-    mag_system : str
-        Photometric system: 'Vega', 'AB', or 'ST'.
-    interp_method : str
-        SED interpolation: 'hermite' (default) or 'linear'.
+        Filter curves.  Must include every name in ``filter_names``.
+    mag_system : {'AB', 'Vega', 'ST'}
+        Photometric system.
+    interp_method : {'hermite', 'linear'}
+        Grid interpolation method.
+    extinction : ExtinctionModel or None
+        Fixed extinction to apply at every likelihood evaluation.
+        Not sampled.  Default None (no extinction).
     n_walkers : int
-        Number of emcee ensemble walkers.  Must be even and ≥ 6.
+        Number of emcee walkers (must be even, >= 2 × n_params = 6).
     n_steps : int
         Total steps per walker including burn-in.
     n_burn : int
-        Steps to discard as burn-in.
+        Steps to discard as burn-in (must be < n_steps).
     n_thin : int
-        Thinning factor applied to the post-burn chain.
+        Thinning factor.
     p0_teff, p0_logg, p0_meta : float or None
         Starting point for the walker ball.  Defaults to grid centre.
     p0_scatter : float
-        Fractional scatter of the initial ball relative to the grid range.
-        Default 0.05 (5 %).
-    progress : bool
-        Show emcee progress bar.
+        Width of the initial ball as a fraction of each parameter range.
     seed : int or None
         Random seed for reproducibility.
+    progress : bool
+        Show emcee progress bar.
 
     Returns
     -------
@@ -227,107 +265,82 @@ def run_inverse(
             "Install it with: pip install emcee"
         ) from exc
 
-    obs_mag = np.asarray(obs_magnitudes, dtype=np.float64)
+    obs_mag = np.asarray(obs_magnitudes,  dtype=np.float64)
     obs_err = np.asarray(obs_uncertainties, dtype=np.float64)
 
     if obs_mag.shape != obs_err.shape:
-        raise ValueError("obs_magnitudes and obs_uncertainties must have the same shape.")
+        raise ValueError("obs_magnitudes and obs_uncertainties must have the same length.")
     if len(filter_names) != len(obs_mag):
-        raise ValueError(
-            f"filter_names has {len(filter_names)} entries but "
-            f"obs_magnitudes has {len(obs_mag)}."
-        )
-    if np.any(obs_err <= 0):
-        raise ValueError("All obs_uncertainties must be positive.")
+        raise ValueError("filter_names must have the same length as obs_magnitudes.")
+    if n_walkers < 6:
+        raise ValueError("n_walkers must be >= 6 (2 × n_dim).")
+    if n_burn >= n_steps:
+        raise ValueError("n_burn must be < n_steps.")
 
-    # Validate that every requested filter name exists in the filters list
-    filter_map = {f.name: f for f in filters}
-    missing = [n for n in filter_names if n not in filter_map]
+    # Validate that all requested filter names exist in the filter list
+    available = {f.name for f in filters}
+    missing   = set(filter_names) - available
     if missing:
         raise ValueError(
-            f"Filter names {missing} are in filter_names but not in the "
-            f"supplied filters list."
+            f"not in the supplied filters: {missing}. "
+            f"Available: {available}"
         )
 
-    # Only pass through the filters needed for inference
-    active_filters = [filter_map[n] for n in filter_names]
+    rng    = np.random.default_rng(seed)
+    n_dim  = 3
+    p0     = _initial_positions(n_walkers, grid,
+                                 p0_teff, p0_logg, p0_meta,
+                                 p0_scatter, rng)
 
-    rng = np.random.default_rng(seed)
+    # Log a note about extinction so it's clear in the user's output
+    if extinction is not None and getattr(extinction.config, 'enabled', False):
+        cfg = extinction.config
+        print(
+            f"[inverse] Extinction enabled: law={cfg.law}, "
+            f"Av={cfg.a_v:.3f}, Rv={cfg.r_v:.2f} "
+            f"(fixed — not sampled)"
+        )
+    else:
+        print("[inverse] Extinction disabled (Av=0 fixed)")
 
-    # ------------------------------------------------------------------
-    # Initial positions
-    # ------------------------------------------------------------------
-    pos = _initial_positions(
-        n_walkers=n_walkers,
-        grid=grid,
-        p0_teff=p0_teff,
-        p0_logg=p0_logg,
-        p0_meta=p0_meta,
-        scatter=p0_scatter,
-        rng=rng,
-    )
-
-    # ------------------------------------------------------------------
-    # Sampler
-    # ------------------------------------------------------------------
-    n_dim = 3
     sampler = emcee.EnsembleSampler(
         n_walkers,
         n_dim,
         _log_posterior,
         args=(
-            obs_mag, obs_err, filter_names,
-            float(R), float(d),
-            grid, active_filters, mag_system, interp_method,
+            obs_mag, obs_err, list(filter_names),
+            R, d, grid, filters,
+            mag_system, interp_method,
+            extinction,                     # fixed, forwarded to every step
         ),
     )
 
-    sampler.run_mcmc(pos, n_steps, progress=progress)
+    sampler.run_mcmc(p0, n_steps, progress=progress)
 
-    # ------------------------------------------------------------------
-    # Flatten chain (discard burn-in, apply thinning)
-    # ------------------------------------------------------------------
-    samples  = sampler.get_chain(discard=n_burn, thin=n_thin, flat=True)
-    log_prob = sampler.get_log_prob(discard=n_burn, thin=n_thin, flat=True)
-    accept   = sampler.acceptance_fraction  # shape (n_walkers,)
+    # Acceptance fraction diagnostic
+    acc = sampler.acceptance_fraction
+    if np.any(acc < 0.1) or np.any(acc > 0.9):
+        warnings.warn(
+            f"Some walkers have extreme acceptance fractions "
+            f"(min={acc.min():.2f}, max={acc.max():.2f}). "
+            f"Consider adjusting n_walkers or p0_scatter.",
+            UserWarning,
+            stacklevel=2,
+        )
 
-    # ------------------------------------------------------------------
-    # Autocorrelation time (best-effort — warns if chain is too short)
-    # ------------------------------------------------------------------
+    # Autocorrelation time (best-effort — short chains will raise)
     try:
-        autocorr = sampler.get_autocorr_time(discard=n_burn, quiet=True)
-    except emcee.autocorr.AutocorrError:
-        autocorr = None
-        warnings.warn(
-            "Autocorrelation time estimation failed — the chain may be too short. "
-            "Consider increasing n_steps.",
-            RuntimeWarning,
-            stacklevel=2,
-        )
+        tau = sampler.get_autocorr_time(quiet=True)
+    except Exception:
+        tau = None
 
-    # ------------------------------------------------------------------
-    # Acceptance fraction sanity check
-    # ------------------------------------------------------------------
-    mean_af = float(np.mean(accept))
-    if mean_af < 0.1:
-        warnings.warn(
-            f"Mean acceptance fraction is very low ({mean_af:.3f}). "
-            "The sampler may not have converged. "
-            "Try increasing n_walkers or adjusting p0_scatter.",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-    elif mean_af > 0.9:
-        warnings.warn(
-            f"Mean acceptance fraction is very high ({mean_af:.3f}). "
-            "The likelihood may be very broad or the prior is dominating.",
-            RuntimeWarning,
-            stacklevel=2,
-        )
+    # Flatten chain, discarding burn-in and applying thinning
+    flat_samples  = sampler.get_chain(discard=n_burn, thin=n_thin, flat=True)
+    flat_log_prob = sampler.get_log_prob(discard=n_burn, thin=n_thin, flat=True)
 
     return InverseResult(
-        samples=samples,
-        log_prob=log_prob,
+        samples=flat_samples,
+        log_prob=flat_log_prob,
         filter_names=list(filter_names),
         obs_magnitudes=obs_mag,
         obs_uncertainties=obs_err,
@@ -338,6 +351,6 @@ def run_inverse(
         n_steps=n_steps,
         n_burn=n_burn,
         n_thin=n_thin,
-        acceptance_fraction=accept,
-        autocorr_time=autocorr,
+        acceptance_fraction=acc,
+        autocorr_time=tau,
     )

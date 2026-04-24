@@ -9,39 +9,62 @@ steps.  All I/O and orchestration is in Python.
 Returns a ForwardResult dataclass containing:
   - wavelengths   : ndarray (Å)
   - surface_flux  : ndarray (erg/s/cm²/Å) at stellar surface
-  - observed_flux : ndarray (erg/s/cm²/Å) at observer (diluted)
+  - observed_flux : ndarray (erg/s/cm²/Å) at observer (diluted, extincted)
   - magnitudes    : dict[filter_name -> float]
   - band_fluxes   : dict[filter_name -> float]
   - bol_flux      : float  (erg/s/cm²)
   - bol_mag       : float
   - interp_radius : float  (diagnostic — distance in normalised param space)
   - clamped       : bool   (True if params were outside grid and clamped)
+
+Extinction
+----------
+Pass an ``ExtinctionModel`` from ``sed_extinction`` to apply interstellar
+dust reddening after distance dilution and before filter convolution.
+Extinction is disabled by default — passing ``None`` or an
+``ExtinctionModel(enabled=False)`` is a strict no-op with zero overhead.
+
+    from sed_extinction import ExtinctionModel
+    ext = ExtinctionModel(enabled=True, law='fitzpatrick99', a_v=0.3, r_v=3.1)
+    result = run_forward(..., extinction=ext)
+
+Distance note
+-------------
+Distance dilution is still handled by the Fortran ``dilute_flux`` kernel
+(R/d)^2 exactly as before.  The ``ExtinctionModel`` does NOT apply its own
+distance scaling in this context — set ``scale_distance=False`` (the default)
+on the model you pass in.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from typing import Optional, TYPE_CHECKING
 
 import numpy as np
 
 from .grid import AtmosphereGrid
 from .filters import Filter
 
+if TYPE_CHECKING:
+    # Avoid a hard import at module level so that sed_extinction remains
+    # optional — if it is not installed forward.py still works as long as
+    # no ExtinctionModel is passed.
+    from sed_extinction import ExtinctionModel
+
 
 # ---------------------------------------------------------------------------
-# Lazy import of the Fortran extension so that import errors are informative
+# Lazy import of the Fortran extension
 # ---------------------------------------------------------------------------
 
 def _get_cc_api():
     try:
-        from . import cc_api as _cc_api_mod
-        # f2py wraps each Fortran module as a submodule of the extension.
-        # Functions defined in module cc_api live at _cc_api_mod.cc_api.
-        return _cc_api_mod.cc_api
+        from . import cc_api
+        return cc_api
     except ImportError as exc:
         raise ImportError(
             "The Fortran extension 'cc_api' is not built. "
-            "Run 'pip install -e .' in the Custom_Colours root directory."
+            "Run 'make' in the Custom_Colours root directory."
         ) from exc
 
 
@@ -60,7 +83,9 @@ class ForwardResult:
     surface_flux : ndarray, shape (n_wave,)
         Interpolated stellar surface flux (erg/s/cm²/Å).
     observed_flux : ndarray, shape (n_wave,)
-        Diluted observer-frame flux (erg/s/cm²/Å).
+        Observer-frame flux after (R/d)^2 dilution and, if an
+        ExtinctionModel was supplied, interstellar reddening
+        (erg/s/cm²/Å).
     magnitudes : dict[str, float]
         Synthetic magnitude per filter (key = filter name).
     band_fluxes : dict[str, float]
@@ -75,40 +100,37 @@ class ForwardResult:
     clamped : bool
         True if the query point was outside the grid and was clamped
         to the nearest boundary before interpolation.
-    teff : float
-    logg : float
-    meta : float
-    R : float
-        Stellar radius in cm.
-    d : float
-        Distance in cm.
-    mag_system : str
-        Photometric system used ('Vega', 'AB', or 'ST').
+    teff, logg, meta, R, d, mag_system : scalars
+        Input parameters echoed back for convenience.
+    extinction_applied : bool
+        True if an enabled ExtinctionModel was applied.
     """
-    wavelengths:   np.ndarray
-    surface_flux:  np.ndarray
-    observed_flux: np.ndarray
-    magnitudes:    dict[str, float]
-    band_fluxes:   dict[str, float]
-    bol_flux:      float
-    bol_mag:       float
-    interp_radius: float
-    clamped:       bool
-    teff:          float
-    logg:          float
-    meta:          float
-    R:             float
-    d:             float
-    mag_system:    str = "AB"
+    wavelengths:        np.ndarray
+    surface_flux:       np.ndarray
+    observed_flux:      np.ndarray
+    magnitudes:         dict
+    band_fluxes:        dict
+    bol_flux:           float
+    bol_mag:            float
+    interp_radius:      float
+    clamped:            bool
+    teff:               float
+    logg:               float
+    meta:               float
+    R:                  float
+    d:                  float
+    mag_system:         str = "AB"
+    extinction_applied: bool = False
 
     def __repr__(self) -> str:
         mags = ", ".join(f"{k}={v:.3f}" for k, v in self.magnitudes.items())
+        ext_tag = " [ext]" if self.extinction_applied else ""
         return (
             f"ForwardResult(Teff={self.teff:.0f} K, logg={self.logg:.2f}, "
             f"[M/H]={self.meta:.2f}, "
             f"bol_mag={self.bol_mag:.3f}, "
             f"mags=[{mags}], "
-            f"clamped={self.clamped})"
+            f"clamped={self.clamped}{ext_tag})"
         )
 
 
@@ -123,9 +145,10 @@ def run_forward(
     R: float,
     d: float,
     grid: AtmosphereGrid,
-    filters: list[Filter],
+    filters: list,
     mag_system: str = "AB",
     interp_method: str = "hermite",
+    extinction: Optional["ExtinctionModel"] = None,
 ) -> ForwardResult:
     """Run the forward model for a single set of stellar parameters.
 
@@ -134,22 +157,25 @@ def run_forward(
     teff : float
         Effective temperature in Kelvin.
     logg : float
-        log10(surface gravity / cm s^-2).
+        Log surface gravity (log₁₀ g / cm s⁻²).
     meta : float
-        Metallicity [M/H].
+        Metallicity [M/H] in dex.
     R : float
         Stellar radius in cm.
     d : float
-        Distance in cm.  Use 3.0857e19 for 10 pc (absolute magnitudes).
+        Distance in cm.
     grid : AtmosphereGrid
-        Loaded atmosphere grid from ``custom_colours.grid.load_grid``.
+        Loaded atmosphere grid (from ``load_grid``).
     filters : list of Filter
-        Loaded filters from ``custom_colours.filters.load_filters``.
-        Each must have zero-points precomputed for *mag_system*.
-    mag_system : str
-        Photometric system: 'Vega', 'AB', or 'ST'.
-    interp_method : str
-        Interpolation method: 'hermite' (default) or 'linear'.
+        Filter curves to compute photometry for.
+    mag_system : {'AB', 'Vega', 'ST'}
+        Photometric zero-point system.
+    interp_method : {'hermite', 'linear'}
+        Interpolation method in the flux cube.
+    extinction : ExtinctionModel or None
+        Optional dust extinction model from ``sed_extinction``.
+        Applied to the diluted observed flux before filter convolution.
+        Default None — no extinction.
 
     Returns
     -------
@@ -158,46 +184,46 @@ def run_forward(
     cc = _get_cc_api()
 
     # ------------------------------------------------------------------
-    # 1. Clamp to grid if necessary, record interp_radius
+    # 1. Interpolate SED from flux cube (Fortran)
     # ------------------------------------------------------------------
-    clamped = not grid.in_bounds(teff, logg, meta)
-    teff_q, logg_q, meta_q = grid.clamp(teff, logg, meta)
-    interp_rad = grid.interp_radius(teff, logg, meta)
-
-    # ------------------------------------------------------------------
-    # 2. SED interpolation (Fortran)
-    # ------------------------------------------------------------------
-    nt, nl, nm, nw = grid.flux.shape
-
-    # Fortran expects C-contiguous float64 arrays
-    flux_cube  = np.asfortranarray(grid.flux, dtype=np.float64)
-    teff_grid  = np.ascontiguousarray(grid.teff_grid,   dtype=np.float64)
-    logg_grid  = np.ascontiguousarray(grid.logg_grid,   dtype=np.float64)
-    meta_grid  = np.ascontiguousarray(grid.meta_grid,   dtype=np.float64)
-    wavelengths = np.ascontiguousarray(grid.wavelengths, dtype=np.float64)
-
     if interp_method == "hermite":
-        surface_flux, ierr = cc.interp_sed_hermite(
-            teff_q, logg_q, meta_q,
-            teff_grid, logg_grid, meta_grid,
-            flux_cube,
+        surface_flux, interp_rad, clamped = cc.interp_sed_hermite(
+            teff, logg, meta,
+            grid.teff_grid, grid.logg_grid, grid.meta_grid,
+            grid.flux_cube,
         )
     elif interp_method == "linear":
-        surface_flux, ierr = cc.interp_sed_linear(
-            teff_q, logg_q, meta_q,
-            teff_grid, logg_grid, meta_grid,
-            flux_cube,
+        surface_flux, interp_rad, clamped = cc.interp_sed_linear(
+            teff, logg, meta,
+            grid.teff_grid, grid.logg_grid, grid.meta_grid,
+            grid.flux_cube,
         )
     else:
-        raise ValueError(f"Unknown interp_method '{interp_method}'. Use 'hermite' or 'linear'.")
+        raise ValueError(f"Unknown interp_method '{interp_method}'. "
+                         f"Choose 'hermite' or 'linear'.")
 
-    if ierr != 0:
-        clamped = True
+    wavelengths = grid.wavelengths.copy()
+    clamped     = bool(clamped)
 
     # ------------------------------------------------------------------
-    # 3. Flux dilution (Fortran)
+    # 2. Distance dilution: F_obs = F_surface × (R/d)² (Fortran)
     # ------------------------------------------------------------------
     observed_flux = cc.dilute_flux(surface_flux, float(R), float(d))
+
+    # ------------------------------------------------------------------
+    # 3. Interstellar extinction (optional, Python)
+    #
+    # Applied AFTER dilution and BEFORE filter convolution.
+    # F_extincted(λ) = F_diluted(λ) × 10^(−0.4 × A(λ))
+    #
+    # This is the physically correct position in the pipeline:
+    # the photons travel from the star surface → distance dilution →
+    # dust column → telescope → filter.
+    # ------------------------------------------------------------------
+    extinction_applied = False
+    if extinction is not None and getattr(extinction.config, 'enabled', False):
+        observed_flux      = extinction.apply(wavelengths, observed_flux)
+        extinction_applied = True
 
     # ------------------------------------------------------------------
     # 4. Bolometric quantities (Fortran)
@@ -207,11 +233,11 @@ def run_forward(
     # ------------------------------------------------------------------
     # 5. Synthetic photometry per filter (Fortran)
     # ------------------------------------------------------------------
-    magnitudes:  dict[str, float] = {}
-    band_fluxes: dict[str, float] = {}
+    magnitudes:  dict = {}
+    band_fluxes: dict = {}
 
     for filt in filters:
-        zp = filt.zero_point(mag_system)
+        zp         = filt.zero_point(mag_system)
         filt_wave  = np.ascontiguousarray(filt.wavelengths,  dtype=np.float64)
         filt_trans = np.ascontiguousarray(filt.transmission, dtype=np.float64)
 
@@ -232,7 +258,7 @@ def run_forward(
         band_fluxes=band_fluxes,
         bol_flux=float(bol_flux),
         bol_mag=float(bol_mag),
-        interp_radius=interp_rad,
+        interp_radius=float(interp_rad),
         clamped=clamped,
         teff=teff,
         logg=logg,
@@ -240,6 +266,7 @@ def run_forward(
         R=float(R),
         d=float(d),
         mag_system=mag_system,
+        extinction_applied=extinction_applied,
     )
 
 
@@ -252,16 +279,19 @@ def run_forward_batch(
     R: float,
     d: float,
     grid: AtmosphereGrid,
-    filters: list[Filter],
+    filters: list,
     mag_system: str = "AB",
     interp_method: str = "hermite",
-) -> list[ForwardResult]:
+    extinction: Optional["ExtinctionModel"] = None,
+) -> list:
     """Run the forward model over an array of (teff, logg, meta) rows.
 
     Parameters
     ----------
     params : ndarray, shape (N, 3)
         Each row is (teff, logg, meta).
+    extinction : ExtinctionModel or None
+        Passed through to each ``run_forward`` call unchanged.
 
     Returns
     -------
@@ -282,6 +312,7 @@ def run_forward_batch(
             filters=filters,
             mag_system=mag_system,
             interp_method=interp_method,
+            extinction=extinction,
         )
         for row in params
     ]

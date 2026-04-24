@@ -7,6 +7,7 @@ custom_colours/forward.py
 custom_colours/grid.py
 custom_colours/inverse.py
 custom_colours/io.py
+custom_colours/sed_extinction.py
 custom_colours.egg-info/PKG-INFO
 custom_colours.egg-info/SOURCES.txt
 custom_colours.egg-info/dependency_links.txt
