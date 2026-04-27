@@ -19,25 +19,19 @@ Usage
 -----
     python extinction_prescription_comparison.py
 
-Requirements: custom_colours built (make), emcee, sed_extinction.py on path.
+Requirements: custom_colours built (make), emcee.
 """
 
 from __future__ import annotations
 
-import sys
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 
-# ---------------------------------------------------------------------------
-# sed_extinction lives one level up (or wherever you keep it)
-# ---------------------------------------------------------------------------
-sys.path.insert(0, "..")   # adjust if needed
-from sed_extinction import ExtinctionModel, make_extinction_model, AVAILABLE_LAWS
-
 from custom_colours import (
     load_grid, load_filters,
     run_forward, run_inverse,
+    ExtinctionModel, make_extinction_model, AVAILABLE_LAWS,
     InverseResult,
 )
 
@@ -45,15 +39,22 @@ from custom_colours import (
 # Configuration — edit these for your setup
 # ---------------------------------------------------------------------------
 
-GRID_PATH    = "/path/to/Kurucz2003all/"          # your flux cube directory
+import os
+
+GRID_PATH    = os.path.expanduser("~/SED_Tools/data/stellar_models/Kurucz2003all")
+FILTER_DIR   = os.path.expanduser("~/SED_Tools/data/filters/GAIA/GAIA")
+VEGA_SED     = os.path.expanduser("~/SED_Tools/data/stellar_models/vega_flam.csv")
+
+# Individual filter files — adjust names to match what is in your FILTER_DIR.
+# The demo uses Gaia + 2MASS as an example; replace with whatever you have.
 FILTER_PATHS = [
-    "/path/to/filters/GAIA/GAIA/G.dat",
-    "/path/to/filters/GAIA/GAIA/Gbp.dat",
-    "/path/to/filters/GAIA/GAIA/Grp.dat",
-    "/path/to/filters/2MASS/J.dat",
-    "/path/to/filters/2MASS/H.dat",
-    "/path/to/filters/2MASS/Ks.dat",
+    os.path.join(FILTER_DIR, "G.dat"),
+    os.path.join(FILTER_DIR, "Gbp.dat"),
+    os.path.join(FILTER_DIR, "Grp.dat"),
 ]
+# Optionally add more filters, e.g. 2MASS:
+# MASS_DIR = os.path.expanduser("~/SED_Tools/data/filters/2MASS/2MASS")
+# FILTER_PATHS += [os.path.join(MASS_DIR, f) for f in ("J.dat", "H.dat", "Ks.dat")]
 
 # "True" stellar parameters used to generate synthetic photometry
 TRUE_TEFF  = 5800.0    # K
@@ -158,7 +159,8 @@ def main():
           f"[M/H] {grid.meta_bounds}")
 
     print("Loading filters...")
-    filters = load_filters(FILTER_PATHS)
+    vega_path = VEGA_SED if os.path.isfile(VEGA_SED) else None
+    filters = load_filters(FILTER_PATHS, vega_sed_path=vega_path)
     filter_names = [f.name for f in filters]
     print(f"  Filters: {filter_names}")
 

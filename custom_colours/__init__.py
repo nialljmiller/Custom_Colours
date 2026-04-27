@@ -29,6 +29,16 @@ Quick start
 ...     grid=grid, filters=filters,
 ... )
 >>> posterior.print_summary()
+>>>
+>>> # Extinction (optional, applied in the forward model)
+>>> from custom_colours import ExtinctionModel, make_extinction_model
+>>> ext = make_extinction_model(enabled=True, law='fitzpatrick99', a_v=0.3)
+>>> result = run_forward(..., extinction=ext)
+>>>
+>>> # Parameter modes for the inverse model
+>>> from custom_colours import FitParams, fit_params_from_grid, fixed, free
+>>> params = fit_params_from_grid(grid, a_v=(0.0, 2.0))  # Av free
+>>> posterior = run_inverse(..., fit_params=params)
 """
 
 from .grid    import load_grid, AtmosphereGrid
@@ -37,19 +47,74 @@ from .forward import run_forward, run_forward_batch, ForwardResult
 from .inverse import run_inverse
 from .io      import InverseResult, save_sed, save_magnitudes
 
+# Parameter specification — fixed, bounded, and free modes
+from .params import (
+    FitParams,
+    ParamSpec,
+    fit_params_from_grid,
+    fixed,
+    free,
+    bounded,
+    PC_TO_CM,
+    RSUN_TO_CM,
+)
+
+# Extinction — separate file, fully part of the package
+from .sed_extinction import (
+    ExtinctionModel,
+    ExtinctionConfig,
+    make_extinction_model,
+    apply_extinction,
+    remove_extinction,
+    ccm89,
+    odonnell94,
+    fitzpatrick99,
+    fm07,
+    calzetti00,
+    gordon23,
+    AVAILABLE_LAWS,
+)
+
 __all__ = [
+    # Grid
     "load_grid",
     "AtmosphereGrid",
+    # Filters
     "load_filters",
     "load_filters_from_instrument_dir",
     "Filter",
+    # Forward model
     "run_forward",
     "run_forward_batch",
     "ForwardResult",
+    # Inverse model
     "run_inverse",
+    # IO
     "InverseResult",
     "save_sed",
     "save_magnitudes",
+    # Parameter modes
+    "FitParams",
+    "ParamSpec",
+    "fit_params_from_grid",
+    "fixed",
+    "free",
+    "bounded",
+    "PC_TO_CM",
+    "RSUN_TO_CM",
+    # Extinction
+    "ExtinctionModel",
+    "ExtinctionConfig",
+    "make_extinction_model",
+    "apply_extinction",
+    "remove_extinction",
+    "ccm89",
+    "odonnell94",
+    "fitzpatrick99",
+    "fm07",
+    "calzetti00",
+    "gordon23",
+    "AVAILABLE_LAWS",
 ]
 
 __version__ = "0.1.0"
